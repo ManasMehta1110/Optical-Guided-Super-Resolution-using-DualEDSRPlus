@@ -196,7 +196,7 @@ def compute_metrics(pred: np.ndarray, target: np.ndarray):
 # Model loading
 # =========================
 @st.cache_resource
-def load_model(model_path: str = "models/hls_ssl4eo_best.pth"):
+def load_model(model_path: str = "models/ssl4eo_best.pth"):
     if not os.path.exists(model_path):
         st.error(f"Model checkpoint not found at {model_path}. Please train the model first.")
         return None
