@@ -15,6 +15,62 @@ from rasterio.enums import Resampling as RioResampling
 from rasterio.warp import reproject
 
 # =========================
+# Page Configuration
+# =========================
+st.set_page_config(
+    page_title="HLS SSL4EO Super-Resolution",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS for better styling and larger images
+st.markdown('''
+    <style>
+        .main {
+            padding: 2rem;
+        }
+        .stImage {
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            margin: 10px 0;
+        }
+        .image-container {
+            background-color: #f0f2f6;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 10px 0;
+        }
+        .metric-card {
+            background-color: #e3f2fd;
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+            margin: 10px 0;
+            border-left: 4px solid #1f77b4;
+        }
+        .section-title {
+            font-size: 22px;
+            font-weight: bold;
+            margin-top: 25px;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 3px solid #1f77b4;
+            color: #1f77b4;
+        }
+        h1 {
+            text-align: center;
+            color: #1f77b4;
+            padding: 20px 0;
+        }
+        .stMetric {
+            background-color: #f0f2f6;
+            padding: 15px;
+            border-radius: 8px;
+        }
+    </style>
+''', unsafe_allow_html=True)
+
+# =========================
 # Model definitions
 # =========================
 class ChannelAttention(nn.Module):
@@ -235,7 +291,6 @@ def process_tiff_upload(uploaded_file, is_rgb: bool = False, is_thermal: bool = 
                         return None
 
                 if reference_profile is not None:
-                    # Placeholder for reprojection if needed
                     pass
 
                 os.remove(temp_path)
@@ -250,36 +305,109 @@ def process_tiff_upload(uploaded_file, is_rgb: bool = False, is_thermal: bool = 
 
 
 # =========================
-# Display helpers
+# Enhanced Display helpers
 # =========================
 def display_rgb_image(img: np.ndarray, title: str):
+    """Display RGB image with title and large size."""
     st.markdown(f"**{title}**")
     display_img = np.transpose(np.clip(img, 0, 1), (1, 2, 0))
-    st.image(display_img, clamp=True, channels='RGB')
+    st.image(display_img, use_column_width=True, clamp=True, channels='RGB')
 
 
 def display_thermal_gray(img: np.ndarray, title: str):
+    """Display thermal grayscale image with title and large size."""
     st.markdown(f"**{title}**")
     gray = np.clip(img.squeeze(), 0, 1)
-    st.image(gray, clamp=True)
+    st.image(gray, use_column_width=True, clamp=True)
 
 
 def display_thermal_colored(img: np.ndarray, title: str, cmap_name: str):
+    """Display thermal image with colormap and large size."""
     st.markdown(f"**{title}**")
     base = np.clip(img.squeeze(), 0, 1)
     cmap = cm.get_cmap(cmap_name)
-    colored = cmap(base)[..., :3]  # drop alpha
-    st.image(colored, clamp=True)
+    colored = cmap(base)[..., :3]
+    st.image(colored, use_column_width=True, clamp=True)
+
+
+def display_metrics_card(psnr_val, ssim_val, rmse_val):
+    """Display metrics in an attractive card layout."""
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("PSNR (dB)", f"{psnr_val:.2f}")
+    
+    with col2:
+        st.metric("SSIM", f"{ssim_val:.4f}")
+    
+    with col3:
+        st.metric("RMSE", f"{rmse_val:.4f}")
 
 
 # =========================
 # Streamlit App
 # =========================
 st.title("HLS SSL4EO Super-Resolution Demo")
-st.markdown(
-    "Upload HR Optical (3-band TIFF), LR Thermal (1-band TIFF), and optionally GT HR Thermal (1-band TIFF). "
-    "Assumes upscale factor=2, aligned grids."
-)
+
+st.markdown("""
+<div style='background-color: #e3f2fd; padding: 15px; border-radius: 8px; margin-bottom: 20px;'>
+    <b>Upload</b> HR Optical (3-band TIFF), LR Thermal (1-band TIFF), and optionally GT HR Thermal (1-band TIFF).
+    <br><b>Note:</b> Assumes upscale factor=2 with aligned grids.
+</div>
+""", unsafe_allow_html=True)
+
+# Sidebar - Configuration
+with st.sidebar:
+    st.header("Configuration")
+    st.markdown("---")
+    
+    # Colormap selector
+    cmap = st.selectbox(
+        "Thermal Colormap",
+        ['hot', 'cool', 'viridis', 'plasma', 'inferno', 'gray'],
+        help="Choose colormap for thermal visualization"
+    )
+    
+    st.markdown("---")
+    st.header("Instructions")
+    st.markdown("""
+    1. **HR Optical**: 3-band TIFF (RGB) at high resolution
+    2. **LR Thermal**: 1-band thermal TIFF at half resolution
+    3. **GT HR Thermal** (Optional): Ground truth thermal image
+    4. All images should be **aligned** (same spatial extent)
+    5. Model path: `models/hls_ssl4eo_best.pth`
+    6. Requires: `rasterio` library
+    """)
+
+# Main content area - File uploaders
+st.markdown("<div class='section-title'>Input Files</div>", unsafe_allow_html=True)
+
+col_optical, col_thermal = st.columns(2)
+
+with col_optical:
+    st.markdown("#### HR Optical (3-band TIFF)")
+    hr_optical_upload = st.file_uploader(
+        "Upload HR RGB Optical TIFF",
+        type=['tif', 'tiff'],
+        key='hr_optical'
+    )
+
+with col_thermal:
+    st.markdown("#### LR Thermal (1-band TIFF)")
+    lr_thermal_upload = st.file_uploader(
+        "Upload LR Thermal TIFF",
+        type=['tif', 'tiff'],
+        key='lr_thermal'
+    )
+
+col_gt, _ = st.columns(2)
+with col_gt:
+    st.markdown("#### GT HR Thermal (Optional, 1-band TIFF)")
+    gt_thermal_upload = st.file_uploader(
+        "Upload GT HR Thermal TIFF",
+        type=['tif', 'tiff'],
+        key='gt_thermal'
+    )
 
 # Model loading
 model = load_model()
@@ -289,29 +417,21 @@ if model is None:
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model.to(DEVICE)
 
-# File uploaders
-col1, col2 = st.columns(2)
-with col1:
-    st.subheader("HR Optical (3-band TIFF)")
-    hr_optical_upload = st.file_uploader("Upload HR RGB Optical TIFF", type=['tif', 'tiff'])
-with col2:
-    st.subheader("LR Thermal (1-band TIFF)")
-    lr_thermal_upload = st.file_uploader("Upload LR Thermal TIFF", type=['tif', 'tiff'])
-
-gt_col1, _ = st.columns(2)
-with gt_col1:
-    st.subheader("GT HR Thermal (Optional, 1-band TIFF)")
-    gt_thermal_upload = st.file_uploader("Upload GT HR Thermal TIFF", type=['tif', 'tiff'])
-
-# Colormap selector
-cmap = st.selectbox("Thermal Colormap", ['hot', 'cool', 'viridis', 'plasma', 'inferno', 'gray'])
-
-if st.button("Run Super-Resolution"):
+# Run button
+st.markdown("---")
+if st.button("Run Super-Resolution", use_container_width=True):
     if hr_optical_upload is None or lr_thermal_upload is None:
-        st.warning("Please upload HR Optical and LR Thermal TIFFs.")
+        st.warning("Please upload both HR Optical and LR Thermal TIFFs.")
         st.stop()
 
+    # Progress indicators
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
     # Process inputs
+    status_text.text("Processing input files...")
+    progress_bar.progress(20)
+    
     hr_rgb = process_tiff_upload(hr_optical_upload, is_rgb=True)
     lr_thermal = process_tiff_upload(lr_thermal_upload, is_thermal=True)
     gt_thermal = process_tiff_upload(gt_thermal_upload, is_thermal=True) if gt_thermal_upload else None
@@ -320,96 +440,105 @@ if st.button("Run Super-Resolution"):
         st.error("Failed to process TIFFs.")
         st.stop()
 
+    progress_bar.progress(40)
+
     # Ensure shapes are compatible (upscale=2)
     lr_h, lr_w = lr_thermal.shape[1:]
     hr_h, hr_w = hr_rgb.shape[1:]
 
     if hr_h != 2 * lr_h or hr_w != 2 * lr_w:
         st.warning(
-            f"Size mismatch: LR should be half HR size. "
+            f"Size mismatch detected: LR should be half HR size. "
             f"LR: ({lr_h},{lr_w}), HR: ({hr_h},{hr_w}). Resizing LR for demo."
         )
-        lr_torch = torch.from_numpy(lr_thermal).unsqueeze(0).float()  # (1,1,H,W)
+        lr_torch = torch.from_numpy(lr_thermal).unsqueeze(0).float()
         lr_torch_resized = F.interpolate(
             lr_torch,
             size=(hr_h // 2, hr_w // 2),
             mode='bilinear',
             align_corners=False
         )
-        lr_thermal = lr_torch_resized.squeeze(0).numpy()  # (1, H, W)
+        lr_thermal = lr_torch_resized.squeeze(0).numpy()
         lr_h, lr_w = lr_thermal.shape[1:]
 
+    progress_bar.progress(60)
+
     # Inference
+    status_text.text("Running super-resolution inference...")
     with torch.no_grad():
-        lr_t = torch.from_numpy(lr_thermal).unsqueeze(0).to(DEVICE)  # (1,1,LRh,LRw)
-        hr_o = torch.from_numpy(hr_rgb).unsqueeze(0).to(DEVICE)      # (1,3,HRh,HRw)
-        sr_thermal = model(lr_t, hr_o).squeeze().cpu().numpy()       # (HRh,HRw)
+        lr_t = torch.from_numpy(lr_thermal).unsqueeze(0).to(DEVICE)
+        hr_o = torch.from_numpy(hr_rgb).unsqueeze(0).to(DEVICE)
+        sr_thermal = model(lr_t, hr_o).squeeze().cpu().numpy()
         sr_thermal = np.clip(sr_thermal, 0, 1)
 
-    st.header("Results")
+    progress_bar.progress(80)
+    status_text.text("Processing complete!")
+    progress_bar.progress(100)
 
-    # ========= Grayscale row(s) =========
+    # Clear progress indicators
+    progress_bar.empty()
+    status_text.empty()
+
+    # ========= RESULTS SECTION =========
+    st.markdown("<div class='section-title'>Results - Grayscale Images</div>", unsafe_allow_html=True)
+    
     if gt_thermal is not None:
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
+        cols = st.columns(4)
+        with cols[0]:
             display_rgb_image(hr_rgb, "HR Optical (RGB)")
-        with c2:
+        with cols[1]:
             display_thermal_gray(lr_thermal[0], "LR Thermal (Grayscale)")
-        with c3:
+        with cols[2]:
             display_thermal_gray(sr_thermal, "SR Thermal (Grayscale)")
-        with c4:
+        with cols[3]:
             display_thermal_gray(gt_thermal[0], "GT HR Thermal (Grayscale)")
     else:
-        c1, c2, c3 = st.columns(3)
-        with c1:
+        cols = st.columns(3)
+        with cols[0]:
             display_rgb_image(hr_rgb, "HR Optical (RGB)")
-        with c2:
+        with cols[1]:
             display_thermal_gray(lr_thermal[0], "LR Thermal (Grayscale)")
-        with c3:
+        with cols[2]:
             display_thermal_gray(sr_thermal, "SR Thermal (Grayscale)")
 
-    # ========= Colored row(s) =========
-    st.subheader("Thermal Images with Colormap")
+    st.divider()
+
+    # ========= Colored Comparison =========
+    st.markdown("<div class='section-title'>Results - Thermal Images with Colormap</div>", unsafe_allow_html=True)
 
     if gt_thermal is not None:
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            display_thermal_colored(lr_thermal[0], "LR Thermal (Colored)", cmap)
-        with c2:
-            display_thermal_colored(sr_thermal, "SR Thermal (Colored)", cmap)
-        with c3:
-            display_thermal_colored(gt_thermal[0], "GT HR Thermal (Colored)", cmap)
+        cols = st.columns(3)
+        with cols[0]:
+            display_thermal_colored(lr_thermal[0], f"LR Thermal ({cmap})", cmap)
+        with cols[1]:
+            display_thermal_colored(sr_thermal, f"SR Thermal ({cmap})", cmap)
+        with cols[2]:
+            display_thermal_colored(gt_thermal[0], f"GT HR Thermal ({cmap})", cmap)
     else:
-        c1, c2 = st.columns(2)
-        with c1:
-            display_thermal_colored(lr_thermal[0], "LR Thermal (Colored)", cmap)
-        with c2:
-            display_thermal_colored(sr_thermal, "SR Thermal (Colored)", cmap)
+        cols = st.columns(2)
+        with cols[0]:
+            display_thermal_colored(lr_thermal[0], f"LR Thermal ({cmap})", cmap)
+        with cols[1]:
+            display_thermal_colored(sr_thermal, f"SR Thermal ({cmap})", cmap)
+
+    st.divider()
 
     # ========= Metrics =========
     if gt_thermal is not None:
+        st.markdown("<div class='section-title'>Performance Metrics</div>", unsafe_allow_html=True)
         psnr_val, ssim_val, rmse_val = compute_metrics(sr_thermal, gt_thermal[0])
-        m1, m2, m3 = st.columns(3)
-        with m1:
-            st.metric("PSNR (dB)", f"{psnr_val:.2f}")
-        with m2:
-            st.metric("SSIM", f"{ssim_val:.4f}")
-        with m3:
-            st.metric("RMSE", f"{rmse_val:.4f}")
-        st.success("Metrics computed between SR and GT.")
+        display_metrics_card(psnr_val, ssim_val, rmse_val)
+        st.success("Metrics computed between SR and GT!")
     else:
-        st.info("Upload GT for metrics.")
+        st.info("Upload GT thermal image to compute metrics.")
 
-# Instructions
-with st.expander("Instructions"):
-    st.markdown(
-        """
-        - **HR Optical**: 3-band TIFF (e.g., B04/B03/B02 or RGB) at high resolution (e.g., 256x256).
-        - **LR Thermal**: 1-band thermal TIFF at low resolution (half size, e.g., 128x128).
-        - **GT HR Thermal** (optional): 1-band ground truth high-res thermal TIFF for comparison.
-        - Images should be aligned (same spatial extent/CRS).
-        - Colormap applies to thermal visuals.
-        - Model loaded from `models/hls_ssl4eo_best.pth`.
-        - Requires `rasterio` for TIFF reading (add to requirements.txt).
-        """
-    )
+    # ========= Image Info =========
+    st.markdown("<div class='section-title'>Image Information</div>", unsafe_allow_html=True)
+    
+    info_col1, info_col2, info_col3 = st.columns(3)
+    with info_col1:
+        st.metric("LR Thermal Size", f"{lr_thermal.shape[1]} x {lr_thermal.shape[2]}")
+    with info_col2:
+        st.metric("HR Optical Size", f"{hr_rgb.shape[1]} x {hr_rgb.shape[2]}")
+    with info_col3:
+        st.metric("SR Thermal Size", f"{sr_thermal.shape[0]} x {sr_thermal.shape[1]}")
