@@ -10,6 +10,9 @@ from skimage.metrics import structural_similarity as ssim
 import math
 from typing import Optional
 import io
+import rasterio
+from rasterio.enums import Resampling as RioResampling
+from rasterio.warp import reproject
 
 # Model definitions (copied from training script)
 class ChannelAttention(nn.Module):
@@ -165,31 +168,48 @@ def load_model(model_path: str = "models/hls_ssl4eo_best.pth"):
     model.eval()
     return model
 
-# Function to process image upload
-def process_image_upload(uploader, is_rgb: bool = False, is_thermal: bool = False):
-    uploaded = uploader
-    if uploaded is not None:
-        image = Image.open(uploaded)
-        if is_rgb:
-            # Assume RGB image, convert to [0,1] float32, shape (H,W,3) -> (3,H,W)
-            img_array = np.array(image).astype(np.float32) / 255.0
-            if img_array.shape[2] == 3:  # RGB
-                img_array = np.transpose(img_array, (2, 0, 1))  # (3,H,W)
-            else:
-                st.warning("RGB image should have 3 channels.")
-                return None
-            # Normalize per channel
-            img_array = np.stack([norm_np(img_array[c]) for c in range(3)], axis=0)
-        elif is_thermal:
-            # Grayscale, (H,W) -> (1,H,W)
-            img_array = np.array(image).astype(np.float32) / 255.0
-            if len(img_array.shape) == 2:
-                img_array = img_array[np.newaxis, :, :]  # (1,H,W)
-            else:
-                img_array = np.mean(img_array, axis=2, keepdims=True)  # Average to gray
-            img_array = norm_np(img_array[0])  # Normalize scalar
-            img_array = img_array[np.newaxis, :, :]  # Back to (1,H,W)
-        return img_array
+# Function to process TIFF upload using rasterio
+def process_tiff_upload(uploaded_file, is_rgb: bool = False, is_thermal: bool = False, reference_profile=None):
+    if uploaded_file is not None:
+        # Save uploaded file temporarily
+        temp_path = f"temp_{uploaded_file.name}"
+        with open(temp_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+        
+        try:
+            with rasterio.open(temp_path) as src:
+                # Read data
+                if is_rgb:
+                    if src.count >= 3:
+                        # Assume bands are B04 (R), B03 (G), B02 (B) or similar; read first 3
+                        data = src.read([1, 2, 3])  # (3, H, W)
+                        # Stack and normalize per band
+                        img_array = np.stack([norm_np(data[c]) for c in range(3)], axis=0)
+                    else:
+                        st.warning("RGB TIFF should have at least 3 bands.")
+                        return None
+                elif is_thermal:
+                    if src.count >= 1:
+                        data = src.read(1)  # (H, W)
+                        img_array = norm_np(data)[np.newaxis, :, :]  # (1, H, W)
+                    else:
+                        st.warning("Thermal TIFF should have at least 1 band.")
+                        return None
+                
+                # Optional: Reproject to reference if provided (for alignment)
+                if reference_profile is not None:
+                    # For simplicity, assume same CRS; reproject if needed
+                    # This is a placeholder; implement full reproject if CRS differs
+                    pass
+                
+                # Clean up temp file
+                os.remove(temp_path)
+                return img_array
+        except Exception as e:
+            st.error(f"Error reading TIFF: {e}")
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            return None
     return None
 
 # Function to display thermal with colormap
@@ -202,9 +222,16 @@ def display_thermal_with_colormap(img: np.ndarray, title: str, cmap: str = 'hot'
     st.pyplot(fig)
     plt.close(fig)
 
+# Function to display RGB image
+def display_rgb_image(img: np.ndarray, title: str):
+    st.subheader(title)
+    # Denormalize for display if needed, but since [0,1], transpose to (H,W,3)
+    display_img = np.transpose(np.clip(img, 0, 1), (1, 2, 0))
+    st.image(display_img, clamp=True, channels='RGB')
+
 # Streamlit App
 st.title("HLS SSL4EO Super-Resolution Demo")
-st.markdown("Upload HR Optical (RGB), LR Thermal, and optionally GT HR Thermal images (PNG/JPG). Assumes upscale factor=2, aligned patches.")
+st.markdown("Upload HR Optical (3-band TIFF), LR Thermal (1-band TIFF), and optionally GT HR Thermal (1-band TIFF). Assumes upscale factor=2, aligned grids.")
 
 # Model loading
 model = load_model()
@@ -214,35 +241,35 @@ if model is None:
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model.to(DEVICE)
 
-# File uploaders
+# File uploaders (now for TIF only)
 col1, col2 = st.columns(2)
 with col1:
-    st.subheader("HR Optical (RGB Image)")
-    hr_optical_upload = st.file_uploader("Upload HR RGB Optical (PNG/JPG)", type=['png', 'jpg', 'jpeg'])
+    st.subheader("HR Optical (3-band TIFF)")
+    hr_optical_upload = st.file_uploader("Upload HR RGB Optical TIFF", type=['tif', 'tiff'])
 with col2:
-    st.subheader("LR Thermal")
-    lr_thermal_upload = st.file_uploader("Upload LR Thermal (Grayscale PNG/JPG)", type=['png', 'jpg', 'jpeg'])
+    st.subheader("LR Thermal (1-band TIFF)")
+    lr_thermal_upload = st.file_uploader("Upload LR Thermal TIFF", type=['tif', 'tiff'])
 
 gt_col1, gt_col2 = st.columns(2)
 with gt_col1:
-    st.subheader("GT HR Thermal (Optional)")
-    gt_thermal_upload = st.file_uploader("Upload GT HR Thermal (Grayscale PNG/JPG)", type=['png', 'jpg', 'jpeg'])
+    st.subheader("GT HR Thermal (Optional, 1-band TIFF)")
+    gt_thermal_upload = st.file_uploader("Upload GT HR Thermal TIFF", type=['tif', 'tiff'])
 
 # Colormap selector
-cmap = st.selectbox("Thermal Colormap", ['hot', 'cool', 'viridis', 'plasma', 'inferno'])
+cmap = st.selectbox("Thermal Colormap", ['hot', 'cool', 'viridis', 'plasma', 'inferno', 'gray'])
 
 if st.button("Run Super-Resolution"):
     if hr_optical_upload is None or lr_thermal_upload is None:
-        st.warning("Please upload HR Optical and LR Thermal images.")
+        st.warning("Please upload HR Optical and LR Thermal TIFFs.")
         st.stop()
 
-    # Process inputs
-    hr_rgb = process_image_upload(hr_optical_upload, is_rgb=True)
-    lr_thermal = process_image_upload(lr_thermal_upload, is_thermal=True)
-    gt_thermal = process_image_upload(gt_thermal_upload, is_thermal=True) if gt_thermal_upload else None
+    # Process inputs using rasterio
+    hr_rgb = process_tiff_upload(hr_optical_upload, is_rgb=True)
+    lr_thermal = process_tiff_upload(lr_thermal_upload, is_thermal=True)
+    gt_thermal = process_tiff_upload(gt_thermal_upload, is_thermal=True) if gt_thermal_upload else None
 
     if hr_rgb is None or lr_thermal is None:
-        st.error("Failed to process images.")
+        st.error("Failed to process TIFFs.")
         st.stop()
 
     # Ensure shapes are compatible (upscale=2)
@@ -269,21 +296,17 @@ if st.button("Run Super-Resolution"):
     # Row 1: HR Optical, LR Thermal (gray)
     col1, col2 = st.columns(2)
     with col1:
-        st.subheader("HR Optical (RGB)")
-        st.image(np.transpose(hr_rgb, (1, 2, 0)), clamp=True, channels='RGB')
+        display_rgb_image(hr_rgb, "HR Optical (RGB)")
     with col2:
-        st.subheader("LR Thermal (Grayscale)")
-        display_thermal_with_colormap(lr_thermal[0], "LR Thermal", cmap='gray')
+        display_thermal_with_colormap(lr_thermal[0], "LR Thermal (Grayscale)", 'gray')
 
     # Row 2: SR Thermal, GT Thermal
     col1, col2 = st.columns(2)
     with col1:
-        st.subheader("Super-Resolved Thermal (Grayscale)")
-        display_thermal_with_colormap(sr_thermal, "SR Thermal", cmap='gray')
+        display_thermal_with_colormap(sr_thermal, "Super-Resolved Thermal (Grayscale)", 'gray')
     if gt_thermal is not None:
         with col2:
-            st.subheader("Ground Truth HR Thermal (Grayscale)")
-            display_thermal_with_colormap(gt_thermal[0], "GT Thermal", cmap='gray')
+            display_thermal_with_colormap(gt_thermal[0], "Ground Truth HR Thermal (Grayscale)", 'gray')
     else:
         with col2:
             st.info("No GT provided.")
@@ -292,7 +315,7 @@ if st.button("Run Super-Resolution"):
     st.subheader("Thermal Images with Colormap")
     col1, col2, col3 = st.columns(3)
     with col1:
-        display_thermal_with_colormap(np.repeat(lr_thermal[0][np.newaxis, :, :], 3, axis=0)[0], "LR Thermal (Colored)", cmap)
+        display_thermal_with_colormap(lr_thermal[0], "LR Thermal (Colored)", cmap)
     with col2:
         display_thermal_with_colormap(sr_thermal, "SR Thermal (Colored)", cmap)
     if gt_thermal is not None:
@@ -316,10 +339,11 @@ if st.button("Run Super-Resolution"):
 # Instructions
 with st.expander("Instructions"):
     st.markdown("""
-    - **HR Optical**: RGB image (e.g., PNG/JPG) at high resolution (e.g., 256x256).
-    - **LR Thermal**: Grayscale thermal at low resolution (half size, e.g., 128x128).
-    - **GT HR Thermal** (optional): Ground truth high-res thermal for comparison.
-    - Images should be aligned (same spatial extent).
+    - **HR Optical**: 3-band TIFF (e.g., B04/B03/B02 or RGB) at high resolution (e.g., 256x256).
+    - **LR Thermal**: 1-band thermal TIFF at low resolution (half size, e.g., 128x128).
+    - **GT HR Thermal** (optional): 1-band ground truth high-res thermal TIFF for comparison.
+    - Images should be aligned (same spatial extent/CRS).
     - Colormap applies to thermal visuals.
     - Model loaded from `models/hls_ssl4eo_best.pth`.
+    - Requires rasterio for TIFF reading (add to requirements.txt).
     """)
