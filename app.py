@@ -705,11 +705,11 @@ if st.button("Run Super-Resolution", use_container_width=True):
         st.markdown("<div class='section-title'>Performance Metrics</div>", unsafe_allow_html=True)
 
         psnr_sr, ssim_sr, rmse_sr = compute_metrics(sr_for_metrics, gt_for_display)
-        st.markdown("**Bilinear Upsampled (Baseline) vs GT**")
+        st.markdown("**Bicubical vs GT**")
         display_metrics_card(psnr_sr, ssim_sr, rmse_sr)
 
         psnr_bi, ssim_bi, rmse_bi = compute_metrics(bicubic_for_metrics, gt_for_display)
-        st.markdown("**Bilinear Upsampled (Baseline) vs GT****SR vs GT**")
+        st.markdown("**SR vs GT**")
         display_metrics_card(psnr_bi, ssim_bi, rmse_bi)
 
         st.success("Metrics computed for both SR and baseline against GT (GT-scaled)!")
