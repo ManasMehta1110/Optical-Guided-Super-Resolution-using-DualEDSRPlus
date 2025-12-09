@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
-import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 from skimage.metrics import structural_similarity as ssim
 import math
 from typing import Optional
@@ -174,7 +174,7 @@ def norm_np(a: np.ndarray) -> np.ndarray:
 def compute_metrics(pred: np.ndarray, target: np.ndarray):
     """PSNR / SSIM / RMSE on [0,1] normalized arrays."""
     pred = np.nan_to_num(pred, nan=0.0, posinf=1.0, neginf=0.0)
-    target = np.nan_to_num(target, nan=0.0, posinf=1.0, neginf=0.0)
+    target = np.nan_to_num(target, nan=0.0, posinf=0.0, neginf=0.0)
 
     mse = float(np.mean((pred - target) ** 2))
     if not np.isfinite(mse) or mse < 1e-12:
@@ -234,7 +234,6 @@ def process_tiff_upload(uploaded_file, is_rgb: bool = False, is_thermal: bool = 
                         st.warning("Thermal TIFF should have at least 1 band.")
                         return None
 
-                # Optional: reproject to reference if provided
                 if reference_profile is not None:
                     # Placeholder for reprojection if needed
                     pass
@@ -253,20 +252,24 @@ def process_tiff_upload(uploaded_file, is_rgb: bool = False, is_thermal: bool = 
 # =========================
 # Display helpers
 # =========================
-def display_thermal_with_colormap(img: np.ndarray, title: str, cmap: str = 'hot'):
-    fig, ax = plt.subplots(figsize=(8, 6))
-    im = ax.imshow(img.squeeze(), cmap=cmap, vmin=0, vmax=1)
-    ax.set_title(title)
-    ax.axis('off')
-    plt.colorbar(im, ax=ax)
-    st.pyplot(fig)
-    plt.close(fig)
-
-
 def display_rgb_image(img: np.ndarray, title: str):
-    st.subheader(title)
+    st.markdown(f"**{title}**")
     display_img = np.transpose(np.clip(img, 0, 1), (1, 2, 0))
     st.image(display_img, clamp=True, channels='RGB')
+
+
+def display_thermal_gray(img: np.ndarray, title: str):
+    st.markdown(f"**{title}**")
+    gray = np.clip(img.squeeze(), 0, 1)
+    st.image(gray, clamp=True)
+
+
+def display_thermal_colored(img: np.ndarray, title: str, cmap_name: str):
+    st.markdown(f"**{title}**")
+    base = np.clip(img.squeeze(), 0, 1)
+    cmap = cm.get_cmap(cmap_name)
+    colored = cmap(base)[..., :3]  # drop alpha
+    st.image(colored, clamp=True)
 
 
 # =========================
@@ -295,7 +298,7 @@ with col2:
     st.subheader("LR Thermal (1-band TIFF)")
     lr_thermal_upload = st.file_uploader("Upload LR Thermal TIFF", type=['tif', 'tiff'])
 
-gt_col1, gt_col2 = st.columns(2)
+gt_col1, _ = st.columns(2)
 with gt_col1:
     st.subheader("GT HR Thermal (Optional, 1-band TIFF)")
     gt_thermal_upload = st.file_uploader("Upload GT HR Thermal TIFF", type=['tif', 'tiff'])
@@ -317,7 +320,7 @@ if st.button("Run Super-Resolution"):
         st.error("Failed to process TIFFs.")
         st.stop()
 
-    # Ensure shapes are compatible (upscale=2) with fixed interpolate call
+    # Ensure shapes are compatible (upscale=2)
     lr_h, lr_w = lr_thermal.shape[1:]
     hr_h, hr_w = hr_rgb.shape[1:]
 
@@ -326,7 +329,6 @@ if st.button("Run Super-Resolution"):
             f"Size mismatch: LR should be half HR size. "
             f"LR: ({lr_h},{lr_w}), HR: ({hr_h},{hr_w}). Resizing LR for demo."
         )
-        # lr_thermal is (1, H, W) -> add batch dim to get (1, 1, H, W)
         lr_torch = torch.from_numpy(lr_thermal).unsqueeze(0).float()  # (1,1,H,W)
         lr_torch_resized = F.interpolate(
             lr_torch,
@@ -334,7 +336,7 @@ if st.button("Run Super-Resolution"):
             mode='bilinear',
             align_corners=False
         )
-        lr_thermal = lr_torch_resized.squeeze(0).numpy()  # back to (1, H, W)
+        lr_thermal = lr_torch_resized.squeeze(0).numpy()  # (1, H, W)
         lr_h, lr_w = lr_thermal.shape[1:]
 
     # Inference
@@ -344,47 +346,55 @@ if st.button("Run Super-Resolution"):
         sr_thermal = model(lr_t, hr_o).squeeze().cpu().numpy()       # (HRh,HRw)
         sr_thermal = np.clip(sr_thermal, 0, 1)
 
-    # Display results
     st.header("Results")
 
-    # Row 1: HR Optical, LR Thermal (gray)
-    col1, col2 = st.columns(2)
-    with col1:
-        display_rgb_image(hr_rgb, "HR Optical (RGB)")
-    with col2:
-        display_thermal_with_colormap(lr_thermal[0], "LR Thermal (Grayscale)", 'gray')
-
-    # Row 2: SR Thermal, GT Thermal
-    col1, col2 = st.columns(2)
-    with col1:
-        display_thermal_with_colormap(sr_thermal, "Super-Resolved Thermal (Grayscale)", 'gray')
+    # ========= Grayscale row(s) =========
     if gt_thermal is not None:
-        with col2:
-            display_thermal_with_colormap(gt_thermal[0], "Ground Truth HR Thermal (Grayscale)", 'gray')
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            display_rgb_image(hr_rgb, "HR Optical (RGB)")
+        with c2:
+            display_thermal_gray(lr_thermal[0], "LR Thermal (Grayscale)")
+        with c3:
+            display_thermal_gray(sr_thermal, "SR Thermal (Grayscale)")
+        with c4:
+            display_thermal_gray(gt_thermal[0], "GT HR Thermal (Grayscale)")
     else:
-        with col2:
-            st.info("No GT provided.")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            display_rgb_image(hr_rgb, "HR Optical (RGB)")
+        with c2:
+            display_thermal_gray(lr_thermal[0], "LR Thermal (Grayscale)")
+        with c3:
+            display_thermal_gray(sr_thermal, "SR Thermal (Grayscale)")
 
-    # Row 3: Colored versions
+    # ========= Colored row(s) =========
     st.subheader("Thermal Images with Colormap")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        display_thermal_with_colormap(lr_thermal[0], "LR Thermal (Colored)", cmap)
-    with col2:
-        display_thermal_with_colormap(sr_thermal, "SR Thermal (Colored)", cmap)
-    if gt_thermal is not None:
-        with col3:
-            display_thermal_with_colormap(gt_thermal[0], "GT Thermal (Colored)", cmap)
 
-    # Metrics
+    if gt_thermal is not None:
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            display_thermal_colored(lr_thermal[0], "LR Thermal (Colored)", cmap)
+        with c2:
+            display_thermal_colored(sr_thermal, "SR Thermal (Colored)", cmap)
+        with c3:
+            display_thermal_colored(gt_thermal[0], "GT HR Thermal (Colored)", cmap)
+    else:
+        c1, c2 = st.columns(2)
+        with c1:
+            display_thermal_colored(lr_thermal[0], "LR Thermal (Colored)", cmap)
+        with c2:
+            display_thermal_colored(sr_thermal, "SR Thermal (Colored)", cmap)
+
+    # ========= Metrics =========
     if gt_thermal is not None:
         psnr_val, ssim_val, rmse_val = compute_metrics(sr_thermal, gt_thermal[0])
-        col1, col2, col3 = st.columns(3)
-        with col1:
+        m1, m2, m3 = st.columns(3)
+        with m1:
             st.metric("PSNR (dB)", f"{psnr_val:.2f}")
-        with col2:
+        with m2:
             st.metric("SSIM", f"{ssim_val:.4f}")
-        with col3:
+        with m3:
             st.metric("RMSE", f"{rmse_val:.4f}")
         st.success("Metrics computed between SR and GT.")
     else:
