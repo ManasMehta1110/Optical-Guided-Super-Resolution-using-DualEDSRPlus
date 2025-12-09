@@ -329,39 +329,55 @@ def load_model(model_path: str = "models/hls_ssl4eo_best.pth"):
 # =========================
 # TIFF processing
 # =========================
-def process_tiff_upload(uploaded_file, is_rgb: bool = False, is_thermal: bool = False):
-    if uploaded_file is not None:
-        temp_path = f"temp_{uploaded_file.name}"
-        with open(temp_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
+def process_tiff_upload(uploaded_file, is_rgb: bool = False, is_thermal: bool = False, return_raw: bool = False):
+    """
+    Read TIFF and return normalized array, optionally with raw DN values.
+    - RGB: (3,H,W) norm, thermal: (1,H,W) norm.
+    If return_raw=True, returns (norm, raw); else just norm.
+    """
+    if uploaded_file is None:
+        return (None, None) if return_raw else None
 
-        try:
-            with rasterio.open(temp_path) as src:
-                if is_rgb:
-                    if src.count >= 3:
-                        data = src.read([1, 2, 3])
-                        img_array = np.stack([norm_np(data[c]) for c in range(3)], axis=0)
-                    else:
-                        st.warning("RGB TIFF should have at least 3 bands.")
-                        return None
+    temp_path = f"temp_{uploaded_file.name}"
+    with open(temp_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
 
-                elif is_thermal:
-                    if src.count >= 1:
-                        data = src.read(1)
-                        img_array = norm_np(data)[np.newaxis, :, :]
-                    else:
-                        st.warning("Thermal TIFF should have at least 1 band.")
-                        return None
+    img_array = None
+    raw = None
 
-                os.remove(temp_path)
-                return img_array
+    try:
+        with rasterio.open(temp_path) as src:
+            if is_rgb:
+                if src.count >= 3:
+                    data = src.read([1, 2, 3]).astype(np.float32)  # (3,H,W)
+                    img_array = np.stack([norm_np(data[c]) for c in range(3)], axis=0)
+                    raw = data
+                else:
+                    st.warning("RGB TIFF should have at least 3 bands.")
+                    return (None, None) if return_raw else None
 
-        except Exception as e:
-            st.error(f"Error reading TIFF: {e}")
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-            return None
-    return None
+            elif is_thermal:
+                if src.count >= 1:
+                    data = src.read(1).astype(np.float32)  # (H,W)
+                    img_array = norm_np(data)[np.newaxis, :, :]
+                    raw = data
+                else:
+                    st.warning("Thermal TIFF should have at least 1 band.")
+                    return (None, None) if return_raw else None
+
+    except Exception as e:
+        st.error(f"Error reading TIFF: {e}")
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        return (None, None) if return_raw else None
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+    if return_raw:
+        return img_array, raw
+    else:
+        return img_array
 
 
 # =========================
@@ -371,23 +387,28 @@ def display_rgb_image(img: np.ndarray, title: str):
     """Display RGB image with title in original dimensions."""
     st.markdown(f"**{title}**")
     display_img = np.transpose(np.clip(img, 0, 1), (1, 2, 0))
-    st.image(display_img, use_column_width=False, clamp=True, channels='RGB')
+    st.image(display_img, clamp=True, channels='RGB')  # removed use_column_width
 
 
 def display_thermal_gray(img: np.ndarray, title: str):
     """Display thermal grayscale image with title in original dimensions."""
     st.markdown(f"**{title}**")
     gray = np.clip(img.squeeze(), 0, 1)
-    st.image(gray, use_column_width=False, clamp=True)
+    st.image(gray, clamp=True)  # removed use_column_width
 
 
 def display_thermal_colored(img: np.ndarray, title: str, cmap_name: str):
     """Display thermal image with colormap in original dimensions."""
     st.markdown(f"**{title}**")
     base = np.clip(img.squeeze(), 0, 1)
-    cmap = cm.get_cmap(cmap_name)
+    # cm.get_cmap is deprecated; use colormaps API
+    try:
+        cmap = cm.colormaps[cmap_name]
+    except AttributeError:
+        # Fallback for older matplotlib, if needed
+        cmap = cm.get_cmap(cmap_name)
     colored = cmap(base)[..., :3]
-    st.image(colored, use_column_width=False, clamp=True)
+    st.image(colored, clamp=True)  # removed use_column_width
 
 
 def display_metrics_card(psnr_val, ssim_val, rmse_val):
@@ -446,8 +467,8 @@ with st.sidebar:
     st.markdown("---")
     st.header("Instructions")
     st.markdown("""
-    1. **HR Optical**: 3-band TIFF (RGB) at high resolution
-    2. **LR Thermal**: 1-band thermal TIFF at half resolution
+    1. **HR Optical**: 3-band TIFF (RGB) at high resolution  
+    2. **LR Thermal**: 1-band thermal TIFF at half resolution  
     3. **GT HR Thermal**: Ground truth thermal image
     """)
 
@@ -505,17 +526,24 @@ if st.button("Run Super-Resolution", use_container_width=True):
     progress_bar.progress(20)
     
     hr_rgb = process_tiff_upload(hr_optical_upload, is_rgb=True)
-    lr_thermal = process_tiff_upload(lr_thermal_upload, is_thermal=True)
-    gt_thermal = process_tiff_upload(gt_thermal_upload, is_thermal=True) if gt_thermal_upload else None
+    lr_thermal_norm, lr_thermal_raw = process_tiff_upload(
+        lr_thermal_upload, is_thermal=True, return_raw=True
+    )
+    if gt_thermal_upload is not None:
+        gt_thermal_norm, gt_thermal_raw = process_tiff_upload(
+            gt_thermal_upload, is_thermal=True, return_raw=True
+        )
+    else:
+        gt_thermal_norm, gt_thermal_raw = None, None
 
-    if hr_rgb is None or lr_thermal is None:
+    if hr_rgb is None or lr_thermal_norm is None:
         st.error("Failed to process TIFFs.")
         st.stop()
 
     progress_bar.progress(40)
 
     # Ensure shapes are compatible (upscale=2)
-    lr_h, lr_w = lr_thermal.shape[1:]
+    lr_h, lr_w = lr_thermal_norm.shape[1:]
     hr_h, hr_w = hr_rgb.shape[1:]
 
     if hr_h != 2 * lr_h or hr_w != 2 * lr_w:
@@ -523,121 +551,185 @@ if st.button("Run Super-Resolution", use_container_width=True):
             f"Size mismatch detected: LR should be half HR size. "
             f"LR: ({lr_h},{lr_w}), HR: ({hr_h},{hr_w}). Resizing LR for demo."
         )
-        lr_torch = torch.from_numpy(lr_thermal).unsqueeze(0).float()
+        lr_torch = torch.from_numpy(lr_thermal_norm).unsqueeze(0).float()
         lr_torch_resized = F.interpolate(
             lr_torch,
             size=(hr_h // 2, hr_w // 2),
             mode='bilinear',
             align_corners=False
         )
-        lr_thermal = lr_torch_resized.squeeze(0).numpy()
-        lr_h, lr_w = lr_thermal.shape[1:]
+        lr_thermal_norm = lr_torch_resized.squeeze(0).numpy()
+        lr_h, lr_w = lr_thermal_norm.shape[1:]
 
     progress_bar.progress(60)
 
     # Inference
     status_text.text("Running super-resolution inference...")
     with torch.no_grad():
-        lr_t = torch.from_numpy(lr_thermal).unsqueeze(0).to(DEVICE)   # (1,1,h,w)
-        hr_o = torch.from_numpy(hr_rgb).unsqueeze(0).to(DEVICE)       # (1,3,H,W)
+        lr_t = torch.from_numpy(lr_thermal_norm).unsqueeze(0).to(DEVICE)   # (1,1,h,w)
+        hr_o = torch.from_numpy(hr_rgb).unsqueeze(0).to(DEVICE)            # (1,3,H,W)
 
-        # Model SR
-        sr_thermal = model(lr_t, hr_o).squeeze().cpu().numpy()
-        sr_thermal = np.clip(sr_thermal, 0, 1)
+        # Model SR (normalized)
+        sr_pred = model(lr_t, hr_o).squeeze().cpu().numpy().astype(np.float32)
 
-        # Bicubic baseline (upsample LR to HR)
-        bicubic_hr = F.interpolate(
-            lr_t, size=(hr_h, hr_w), mode='bicubic', align_corners=False
-        ).squeeze().cpu().numpy()
-        bicubic_hr = np.clip(bicubic_hr, 0, 1)
+        # Bicubic-style baseline (bilinear upsample)
+        if gt_thermal_raw is not None:
+            gt_h, gt_w = gt_thermal_raw.shape
+            bicubic_hr = F.interpolate(
+                lr_t, size=(gt_h, gt_w), mode='bilinear', align_corners=False
+            ).squeeze().cpu().numpy().astype(np.float32)
+        else:
+            bicubic_hr = F.interpolate(
+                lr_t, size=(hr_h, hr_w), mode='bilinear', align_corners=False
+            ).squeeze().cpu().numpy().astype(np.float32)
 
     progress_bar.progress(80)
     status_text.text("Processing complete!")
     progress_bar.progress(100)
 
-    # Clear progress indicators
     progress_bar.empty()
     status_text.empty()
 
-    # ========= RESULTS SECTION =========
+    # =========================
+    # Scaling like eval script when GT exists
+    # =========================
+    sr_for_display = None
+    bicubic_for_display = None
+    gt_for_display = None
+    sr_for_metrics = None
+    bicubic_for_metrics = None
+    sr_rescaled_dn = None
+    bicubic_rescaled_dn = None
+
+    if gt_thermal_raw is not None:
+        gt_min = float(np.nanmin(gt_thermal_raw))
+        gt_max = float(np.nanmax(gt_thermal_raw))
+        denom_gt = gt_max - gt_min + 1e-8
+
+        gt_norm_common = (gt_thermal_raw - gt_min) / denom_gt
+        gt_norm_common = np.clip(gt_norm_common, 0.0, 1.0)
+
+        # SR branch
+        sr_min = float(np.nanmin(sr_pred))
+        sr_max = float(np.nanmax(sr_pred))
+        denom_sr = sr_max - sr_min + 1e-8
+        sr_norm = (sr_pred - sr_min) / denom_sr
+        sr_rescaled_dn = sr_norm * (gt_max - gt_min) + gt_min
+        sr_norm_common = (sr_rescaled_dn - gt_min) / denom_gt
+        sr_norm_common = np.clip(sr_norm_common, 0.0, 1.0)
+
+        # Bicubic branch
+        bi_min = float(np.nanmin(bicubic_hr))
+        bi_max = float(np.nanmax(bicubic_hr))
+        denom_bi = bi_max - bi_min + 1e-8
+        bicubic_norm = (bicubic_hr - bi_min) / denom_bi
+        bicubic_rescaled_dn = bicubic_norm * (gt_max - gt_min) + gt_min
+        bicubic_norm_common = (bicubic_rescaled_dn - gt_min) / denom_gt
+        bicubic_norm_common = np.clip(bicubic_norm_common, 0.0, 1.0)
+
+        gt_for_display = gt_norm_common
+        sr_for_display = sr_norm_common
+        bicubic_for_display = bicubic_norm_common
+        sr_for_metrics = sr_norm_common
+        bicubic_for_metrics = bicubic_norm_common
+    else:
+        # No GT: normal min-max just for visualization
+        sr_for_display = norm_np(sr_pred)
+        bicubic_for_display = norm_np(bicubic_hr)
+        gt_for_display = None
+        sr_for_metrics = None
+        bicubic_for_metrics = None
+        sr_rescaled_dn = sr_pred.astype(np.float32)
+        bicubic_rescaled_dn = bicubic_hr.astype(np.float32)
+
+    # =========================
+    # RESULTS - Grayscale
+    # =========================
     st.markdown("<div class='section-title'>Results - Grayscale Images</div>", unsafe_allow_html=True)
     
-    if gt_thermal is not None:
-        # Show HR optical on its own row
+    if gt_thermal_raw is not None:
         display_rgb_image(hr_rgb, "HR Optical (RGB)")
 
-        # Second row: LR, Bicubic, SR, GT
         cols = st.columns(4)
         with cols[0]:
-            display_thermal_gray(lr_thermal[0], "LR Thermal (Grayscale)")
+            display_thermal_gray(lr_thermal_norm[0], "LR Thermal (Grayscale)")
         with cols[1]:
-            display_thermal_gray(bicubic_hr, "Bicubic Upsampled Thermal (Grayscale)")
+            display_thermal_gray(bicubic_for_display, "Bilinear Upsampled (Baseline)")
         with cols[2]:
-            display_thermal_gray(sr_thermal, "SR Thermal (Grayscale)")
+            display_thermal_gray(sr_for_display, "SR Thermal (Grayscale, GT-scaled)")
         with cols[3]:
-            display_thermal_gray(gt_thermal[0], "GT HR Thermal (Grayscale)")
+            display_thermal_gray(gt_for_display, "GT HR Thermal (Grayscale)")
     else:
         cols = st.columns(4)
         with cols[0]:
             display_rgb_image(hr_rgb, "HR Optical (RGB)")
         with cols[1]:
-            display_thermal_gray(lr_thermal[0], "LR Thermal (Grayscale)")
+            display_thermal_gray(lr_thermal_norm[0], "LR Thermal (Grayscale)")
         with cols[2]:
-            display_thermal_gray(bicubic_hr, "Bicubic Upsampled Thermal (Grayscale)")
+            display_thermal_gray(bicubic_for_display, "Bilinear Upsampled (Baseline)")
         with cols[3]:
-            display_thermal_gray(sr_thermal, "SR Thermal (Grayscale)")
+            display_thermal_gray(sr_for_display, "SR Thermal (Grayscale)")
 
     st.divider()
 
-    # ========= Colored Comparison =========
+    # =========================
+    # Colored comparison
+    # =========================
     st.markdown("<div class='section-title'>Results - Thermal Images with Colormap</div>", unsafe_allow_html=True)
 
-    if gt_thermal is not None:
+    if gt_thermal_raw is not None:
         cols = st.columns(4)
         with cols[0]:
-            display_thermal_colored(lr_thermal[0], f"LR Thermal ({cmap})", cmap)
+            display_thermal_colored(lr_thermal_norm[0], f"LR Thermal ({cmap})", cmap)
         with cols[1]:
-            display_thermal_colored(bicubic_hr, f"Bicubic Upsampled Thermal ({cmap})", cmap)
+            display_thermal_colored(bicubic_for_display, f"Bilinear Upsampled ({cmap})", cmap)
         with cols[2]:
-            display_thermal_colored(sr_thermal, f"SR Thermal ({cmap})", cmap)
+            display_thermal_colored(sr_for_display, f"SR Thermal ({cmap})", cmap)
         with cols[3]:
-            display_thermal_colored(gt_thermal[0], f"GT HR Thermal ({cmap})", cmap)
+            display_thermal_colored(gt_for_display, f"GT HR Thermal ({cmap})", cmap)
     else:
         cols = st.columns(3)
         with cols[0]:
-            display_thermal_colored(lr_thermal[0], f"LR Thermal ({cmap})", cmap)
+            display_thermal_colored(lr_thermal_norm[0], f"LR Thermal ({cmap})", cmap)
         with cols[1]:
-            display_thermal_colored(bicubic_hr, f"Bicubic Upsampled Thermal ({cmap})", cmap)
+            display_thermal_colored(bicubic_for_display, f"Bilinear Upsampled ({cmap})", cmap)
         with cols[2]:
-            display_thermal_colored(sr_thermal, f"SR Thermal ({cmap})", cmap)
+            display_thermal_colored(sr_for_display, f"SR Thermal ({cmap})", cmap)
 
     st.divider()
 
-    # ========= Metrics =========
-    if gt_thermal is not None:
+    # =========================
+    # Metrics
+    # =========================
+    if gt_thermal_raw is not None and sr_for_metrics is not None:
         st.markdown("<div class='section-title'>Performance Metrics</div>", unsafe_allow_html=True)
 
-        # SR vs GT
-        psnr_sr, ssim_sr, rmse_sr = compute_metrics(sr_thermal, gt_thermal[0])
+        psnr_sr, ssim_sr, rmse_sr = compute_metrics(sr_for_metrics, gt_for_display)
         st.markdown("**SR vs GT**")
         display_metrics_card(psnr_sr, ssim_sr, rmse_sr)
 
-        # Bicubic vs GT
-        psnr_bi, ssim_bi, rmse_bi = compute_metrics(bicubic_hr, gt_thermal[0])
-        st.markdown("**Bicubic vs GT**")
+        psnr_bi, ssim_bi, rmse_bi = compute_metrics(bicubic_for_metrics, gt_for_display)
+        st.markdown("**Bilinear Upsampled (Baseline) vs GT**")
         display_metrics_card(psnr_bi, ssim_bi, rmse_bi)
 
-        st.success("Metrics computed for both SR and Bicubic against GT!")
+        st.success("Metrics computed for both SR and baseline against GT (GT-scaled)!")
     else:
         st.info("Upload GT thermal image to compute metrics.")
 
     st.divider()
 
-    # ========= Download SR & Bicubic Images =========
-    st.markdown("<div class='section-title'>Download Super-Resolution & Bicubic Images</div>", unsafe_allow_html=True)
+    # =========================
+    # Download SR & Baseline
+    # =========================
+    st.markdown("<div class='section-title'>Download Super-Resolution & Baseline Images</div>", unsafe_allow_html=True)
+
+    if sr_rescaled_dn is None:
+        sr_rescaled_dn = sr_pred.astype(np.float32)
+    if bicubic_rescaled_dn is None:
+        bicubic_rescaled_dn = bicubic_hr.astype(np.float32)
     
-    sr_tiff_bytes = save_tiff(sr_thermal.astype(np.float32), "sr_thermal.tif")
-    bicubic_tiff_bytes = save_tiff(bicubic_hr.astype(np.float32), "bicubic_thermal.tif")
+    sr_tiff_bytes = save_tiff(sr_rescaled_dn.astype(np.float32), "sr_thermal.tif")
+    bicubic_tiff_bytes = save_tiff(bicubic_rescaled_dn.astype(np.float32), "bicubic_thermal.tif")
     
     col_d1, col_d2 = st.columns(2)
     with col_d1:
@@ -650,9 +742,9 @@ if st.button("Run Super-Resolution", use_container_width=True):
         )
     with col_d2:
         st.download_button(
-            label="Download Bicubic Thermal (TIFF)",
+            label="Download Baseline (Bilinear Upsampled) Thermal (TIFF)",
             data=bicubic_tiff_bytes,
-            file_name="bicubic_thermal_output.tif",
+            file_name="baseline_thermal_output.tif",
             mime="image/tiff",
             use_container_width=True
         )
